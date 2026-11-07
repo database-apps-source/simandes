@@ -8,11 +8,32 @@
  */
 const MENU = [
   { key:'dashboard', label:'Dashboard', num:'01', roles:['SEKDES','KADES','SUPERADMIN'] },
-  { key:'input', label:'Input Realisasi SPJ', num:'02', roles:['SEKDES','SUPERADMIN'] },
-  { key:'rekap', label:'Rekap & Laporan', num:'03', roles:['SEKDES','KADES','SUPERADMIN'] },
-  { key:'approval', label:'Verifikasi & Approval', num:'04', roles:['KADES','SUPERADMIN'] },
-  { key:'pengaturan', label:'Pengaturan & Admin', num:'05', roles:['SEKDES','SUPERADMIN'] },
+  { key:'pagu', label:'Pagu Indikatif', num:'02', roles:['SEKDES','SUPERADMIN'] },
+  { key:'input', label:'Input Realisasi SPJ', num:'03', roles:['SEKDES','SUPERADMIN'] },
+  { key:'rekap', label:'Rekap & Laporan', num:'04', roles:['SEKDES','KADES','SUPERADMIN'] },
+  { key:'approval', label:'Verifikasi & Approval', num:'05', roles:['KADES','SUPERADMIN'] },
+  { key:'pengaturan', label:'Pengaturan & Admin', num:'06', roles:['SEKDES','SUPERADMIN'] },
 ];
+
+// ===================== IDENTITAS APLIKASI (LOGO, NAMA, WARNA) =====================
+// Disimpan terpisah dari cache SWR agar bisa diterapkan ke seluruh halaman (sidebar,
+// judul tab) segera setelah tersedia dari mana pun data pengaturan didapat.
+const AppSettings = {
+  get(){ try { return JSON.parse(localStorage.getItem('simandes:pengaturan')); } catch(e){ return null; } },
+  set(p){ if (!p) return; localStorage.setItem('simandes:pengaturan', JSON.stringify(p)); applyBranding(p); }
+};
+function applyBranding(p){
+  if (!p) return;
+  document.documentElement.style.setProperty('--primary', p.warna_primary || '#18181B');
+  document.documentElement.style.setProperty('--secondary', p.warna_secondary || '#71717A');
+  document.title = (p.nama_aplikasi || 'SIMANDES') + ' — Desa ' + (p.nama_desa || 'Puspahiang');
+  document.querySelectorAll('.brand .name').forEach(el => el.textContent = p.nama_aplikasi || 'SIMANDES 2026');
+  document.querySelectorAll('.brand .desa').forEach(el => el.textContent = `Desa ${p.nama_desa||''}, Kec. ${p.nama_kecamatan||''}`);
+  document.querySelectorAll('.logo-box').forEach(box => {
+    box.innerHTML = p.logo_url ? `<img src="${p.logo_url}" alt="logo" style="width:100%;height:100%;object-fit:contain">` : 'SM';
+    box.style.background = p.logo_url ? '#fff' : 'var(--primary)';
+  });
+}
 
 function renderShell(){
   const ses = Session.get();
@@ -39,11 +60,13 @@ function renderShell(){
           </div>
           <div class="topbar-right">
             <span class="chip" id="chip-role"></span>
-            <div class="avatar" id="avatar"></div>
+            <div class="avatar" id="avatar" title=""></div>
+            <button class="btn btn-outline btn-sm" id="btn-logout">Keluar</button>
           </div>
         </div>
         <div class="content" id="content">
           <div id="page-dashboard" class="page"></div>
+          <div id="page-pagu" class="page"></div>
           <div id="page-input" class="page"></div>
           <div id="page-rekap" class="page"></div>
           <div id="page-approval" class="page"></div>
@@ -53,8 +76,12 @@ function renderShell(){
     </div>`;
 
   document.getElementById('chip-role').textContent = 'ROLE: ' + ses.profil.role;
-  document.getElementById('avatar').textContent = (ses.profil.nama || '?').slice(0,1).toUpperCase();
+  const avatarEl = document.getElementById('avatar');
+  avatarEl.textContent = (ses.profil.nama || '?').slice(0,1).toUpperCase();
+  avatarEl.title = ses.profil.nama + ' (' + ses.profil.email + ')';
   document.getElementById('btn-burger').onclick = () => document.getElementById('sidebar').classList.toggle('open');
+  document.getElementById('btn-logout').onclick = () => { if (confirm('Yakin ingin keluar dari SIMANDES?')) logout(); };
+  applyBranding(AppSettings.get());
 
   const navList = document.getElementById('nav-list');
   navList.innerHTML = MENU.filter(m => m.roles.includes(ses.profil.role)).map(m =>
@@ -85,7 +112,7 @@ async function router(){
   const target = allowed ? page : 'dashboard';
   setActiveNav(target); showPage(target);
 
-  const renderers = { dashboard: renderDashboard, input: renderInput, rekap: renderRekap, approval: renderApproval, pengaturan: renderPengaturan };
+  const renderers = { dashboard: renderDashboard, pagu: renderPagu, input: renderInput, rekap: renderRekap, approval: renderApproval, pengaturan: renderPengaturan };
   renderers[target] && renderers[target]();
 }
 window.addEventListener('hashchange', router);
@@ -119,6 +146,7 @@ function renderLogin(root){
     if (!res.success){ errEl.textContent = res.message; errEl.classList.remove('hidden'); return; }
     Session.set({ token: res.token, profil: res.profil });
     Store.set('dashboard', res.dashboard);
+    AppSettings.set(res.dashboard.pengaturan);
     location.hash = '#/dashboard';
     renderShell();
   };
@@ -131,6 +159,7 @@ function renderDashboard(){
   el.innerHTML = `<div id="dash-body"><div class="stat-grid">${skeletons(4)}</div><div class="card"><div class="card-body skel" style="height:260px"></div></div></div>`;
   swr('dashboard', 60000, () => apiGet('bootstrapDashboard'), (data, stale, err) => {
     if (!data){ el.querySelector('#dash-body').innerHTML = errBox(err); return; }
+    AppSettings.set(data.pengaturan);
     const a = data.agregasi;
     el.querySelector('#dash-body').innerHTML = `
       <div class="stat-grid">
@@ -171,6 +200,97 @@ function badge(status){
 }
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
+// ===================== PAGU INDIKATIF (CRUD, sinkron ke Spreadsheet) =====================
+let _paguDaftarBidang = [];
+function renderPagu(){
+  const el = document.getElementById('page-pagu');
+  el.innerHTML = `<div class="card"><div class="card-body skel" style="height:420px"></div></div>`;
+  swr('pagu', 20000, () => apiGet('bootstrapPagu'), (data, stale, err) => {
+    if (!data){ el.innerHTML = errBox(err); return; }
+    _paguDaftarBidang = data.daftarBidang;
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-head flex justify-between">
+          <span class="title">Data Acuan Pagu Indikatif APBDes 2026 (Total: <span class="tnum">${rupiah(data.totalPagu)}</span>)</span>
+          <button class="btn btn-primary btn-sm" id="btn-tambah-pagu">+ Tambah Kegiatan</button>
+        </div>
+        <div class="card-body table-wrap">
+          <table class="ledger"><thead><tr><th>Bidang</th><th>Kode</th><th>Nama Kegiatan</th><th>Satuan Output</th><th class="num">Jumlah Pagu</th><th>Aksi</th></tr></thead>
+          <tbody>${data.list.map(k => `<tr>
+            <td>${esc(k.namaBidang)}</td><td>${esc(k.kodeKegiatan)}</td><td>${esc(k.namaKegiatan)}</td><td>${esc(k.satuanOutput)}</td>
+            <td class="num tnum">${rupiah(k.jumlahPagu)}</td>
+            <td class="flex gap-sm">
+              <button class="btn btn-sm btn-outline" data-edit="${k.kodeKegiatan}">Ubah</button>
+              <button class="btn btn-sm btn-danger" data-hapus="${k.kodeKegiatan}">Hapus</button>
+            </td>
+          </tr>`).join('') || '<tr><td colspan="6" class="muted">Belum ada data pagu.</td></tr>'}</tbody></table>
+        </div>
+      </div>`;
+    document.getElementById('btn-tambah-pagu').onclick = () => bukaModalPagu(null);
+    el.querySelectorAll('[data-edit]').forEach(btn => btn.onclick = () => bukaModalPagu(data.list.find(k => k.kodeKegiatan === btn.dataset.edit)));
+    el.querySelectorAll('[data-hapus]').forEach(btn => btn.onclick = () => hapusPagu(btn.dataset.hapus));
+  });
+}
+function bukaModalPagu(existing){
+  const isEdit = !!existing;
+  const host = document.createElement('div');
+  host.className = 'modal-backdrop';
+  host.innerHTML = `
+    <div class="modal" style="max-width:640px">
+      <h3>${isEdit ? 'Ubah Kegiatan & Pagu' : 'Tambah Kegiatan & Pagu Baru'}</h3>
+      <form id="form-pagu">
+        <div class="grid2">
+          <div class="field"><label>Bidang APBDes</label>
+            <select id="pg-bidang" required>${_paguDaftarBidang.map(b => `<option value="${b.kode}" ${existing && existing.kodeBidang===b.kode?'selected':''}>${esc(b.nama)}</option>`).join('')}</select>
+          </div>
+          <div class="field"><label>Kode Kegiatan</label><input id="pg-kode" placeholder="mis. 02.02.04" value="${esc(existing?.kodeKegiatan||'')}" required></div>
+        </div>
+        <div class="field"><label>Nama Kegiatan</label><input id="pg-nama" value="${esc(existing?.namaKegiatan||'')}" required></div>
+        <div class="grid2">
+          <div class="field"><label>Kode Output</label><input id="pg-kodeoutput" value="${esc(existing?.kodeOutput||'')}"></div>
+          <div class="field"><label>Satuan Output</label><input id="pg-satuan" placeholder="mis. Unit / M / OB" value="${esc(existing?.satuanOutput||'')}"></div>
+        </div>
+        <div class="field"><label>Uraian Output</label><input id="pg-uraian" value="${esc(existing?.uraianOutput||'')}"></div>
+        <div class="field"><label class="muted" style="font-size:11px">ALOKASI PER SUMBER DANA (Rp)</label></div>
+        <div class="grid2">
+          <div class="field"><label>Dana Desa (APBN)</label><input type="number" id="pg-danadesa" min="0" value="${existing?.danaDesa||0}"></div>
+          <div class="field"><label>Alokasi Dana Desa (ADD)</label><input type="number" id="pg-add" min="0" value="${existing?.add_||0}"></div>
+          <div class="field"><label>Bagi Hasil Pajak/Retribusi</label><input type="number" id="pg-bagihasil" min="0" value="${existing?.bagiHasil||0}"></div>
+          <div class="field"><label>Bantuan Keuangan Prov/Kab</label><input type="number" id="pg-bankeu" min="0" value="${existing?.bankeu||0}"></div>
+          <div class="field"><label>Pendapatan Asli Desa (PAD)</label><input type="number" id="pg-pad" min="0" value="${existing?.pad||0}"></div>
+          <div class="field"><label>Swadaya Masyarakat</label><input type="number" id="pg-swadaya" min="0" value="${existing?.swadaya||0}"></div>
+        </div>
+        <div class="field"><label>Pendapatan Lain-lain (DLL)</label><input type="number" id="pg-dll" min="0" value="${existing?.dll||0}"></div>
+        <div class="flex gap-sm justify-between" style="margin-top:1rem">
+          <button type="button" class="btn btn-outline" id="pg-batal">Batal</button>
+          <button type="submit" class="btn btn-primary">${isEdit ? 'Simpan Perubahan' : 'Tambahkan ke Pagu Indikatif'}</button>
+        </div>
+      </form>
+    </div>`;
+  document.body.appendChild(host);
+  host.querySelector('#pg-batal').onclick = () => host.remove();
+  host.querySelector('#form-pagu').onsubmit = async (e) => {
+    e.preventDefault();
+    const payload = {
+      kodeBidang: v2(host,'pg-bidang'), kodeKegiatan: v2(host,'pg-kode'), namaKegiatan: v2(host,'pg-nama'),
+      kodeOutput: v2(host,'pg-kodeoutput'), uraianOutput: v2(host,'pg-uraian'), satuanOutput: v2(host,'pg-satuan'),
+      danaDesa: v2(host,'pg-danadesa'), add_: v2(host,'pg-add'), bagiHasil: v2(host,'pg-bagihasil'),
+      bankeu: v2(host,'pg-bankeu'), pad: v2(host,'pg-pad'), swadaya: v2(host,'pg-swadaya'), dll: v2(host,'pg-dll')
+    };
+    if (isEdit) payload.kodeKegiatanAsli = existing.kodeKegiatan;
+    const res = await apiPost(isEdit ? 'updatePagu' : 'savePagu', payload);
+    toast(res.message, res.success ? 'ok' : 'err');
+    if (res.success){ host.remove(); Store.set('pagu', null); Store.set('input', null); Store.set('rekap', null); Store.set('dashboard', null); renderPagu(); }
+  };
+}
+async function hapusPagu(kodeKegiatan){
+  if (!confirm('Yakin menghapus kegiatan ' + kodeKegiatan + ' dari Pagu Indikatif?')) return;
+  const res = await apiPost('deletePagu', { kodeKegiatan });
+  toast(res.message, res.success ? 'ok' : 'err');
+  if (res.success){ Store.set('pagu', null); Store.set('input', null); Store.set('rekap', null); Store.set('dashboard', null); renderPagu(); }
+}
+function v2(host, id){ return host.querySelector('#'+id).value; }
+
 // ===================== INPUT REALISASI =====================
 let _inputKegiatan = [];
 function renderInput(){
@@ -179,7 +299,7 @@ function renderInput(){
   swr('input', 30000, () => apiGet('bootstrapInput'), (data, stale, err) => {
     if (!data){ el.innerHTML = errBox(err); return; }
     _inputKegiatan = data.kegiatan;
-    const bidangSet = [...new Set(data.kegiatan.map(k => k.kodeBidang))];
+    const bidangSet = [...new Set(data.kegiatan.map(k => k.kodeBidang))].sort();
     el.innerHTML = `
       <div class="card">
         <div class="card-head"><span class="title">Formulir Input Realisasi Anggaran</span></div>
@@ -187,7 +307,7 @@ function renderInput(){
           <form id="form-input">
             <div class="grid2">
               <div class="field"><label>Bidang APBDes</label>
-                <select id="in-bidang" required><option value="">Pilih bidang</option>${bidangSet.map(b => `<option value="${b}">[${b}] ${esc(_inputKegiatan.find(k=>k.kodeBidang===b).namaBidang)}</option>`).join('')}</select>
+                <select id="in-bidang" required><option value="">Pilih bidang</option>${bidangSet.map(b => `<option value="${b}">${esc(_inputKegiatan.find(k=>k.kodeBidang===b).namaBidang)}</option>`).join('')}</select>
               </div>
               <div class="field"><label>Sub Bidang / Kegiatan</label><select id="in-kegiatan" required disabled><option value="">Pilih bidang dahulu</option></select></div>
             </div>
@@ -393,10 +513,22 @@ function renderPengaturan(){
   swr('pengaturan', 60000, () => apiGet('bootstrapPengaturan'), (data, stale, err) => {
     if (!data){ el.innerHTML = errBox(err); return; }
     const p = data.pengaturan;
+    AppSettings.set(p);
     el.innerHTML = `
       <div class="card">
         <div class="card-head"><span class="title">Identitas Aplikasi &amp; Kop Laporan</span></div>
         <div class="card-body">
+          <div class="field">
+            <label>Logo Aplikasi</label>
+            <div class="flex gap-md">
+              <div class="logo-box" id="logo-preview" style="width:64px;height:64px;flex:0 0 64px">${p.logo_url ? `<img src="${esc(p.logo_url)}" style="width:100%;height:100%;object-fit:contain">` : 'SM'}</div>
+              <div>
+                <input type="file" id="st-logo-file" accept="image/png,image/jpeg,image/svg+xml,image/webp">
+                <div class="hint">Format PNG/JPG/SVG/WebP, maksimal 2 MB. Logo langsung tersimpan ke Google Drive &amp; tampil di seluruh halaman.</div>
+                <button type="button" class="btn btn-outline btn-sm" id="btn-upload-logo" style="margin-top:.5rem">Unggah Logo</button>
+              </div>
+            </div>
+          </div>
           <form id="form-setting">
             <div class="field"><label>Nama Aplikasi</label><input id="st-nama" value="${esc(p.nama_aplikasi)}"></div>
             <div class="grid2">
@@ -469,7 +601,31 @@ function renderPengaturan(){
         namaKepalaDesa: v('st-kades'), tahunAnggaran: v('st-tahun')
       });
       toast(res.message, res.success ? 'ok' : 'err');
-      if (res.success) Store.set('pengaturan', null);
+      if (res.success){
+        Store.set('pengaturan', null);
+        AppSettings.set(Object.assign({}, p, {
+          nama_aplikasi: v('st-nama'), warna_primary: v('st-primary'), warna_secondary: v('st-secondary'),
+          nama_desa: v('st-desa'), nama_kecamatan: v('st-kec'), nama_kabupaten: v('st-kab'),
+          nama_provinsi: v('st-prov'), nama_kepala_desa: v('st-kades'), tahun_anggaran: v('st-tahun')
+        }));
+      }
+    };
+    document.getElementById('btn-upload-logo').onclick = async () => {
+      const fileInput = document.getElementById('st-logo-file');
+      const file = fileInput.files[0];
+      if (!file){ toast('Pilih berkas logo terlebih dahulu.', 'err'); return; }
+      if (file.size > 2 * 1024 * 1024){ toast('Ukuran logo melebihi 2 MB.', 'err'); return; }
+      const btn = document.getElementById('btn-upload-logo');
+      btn.disabled = true; btn.textContent = 'Mengunggah...';
+      const base64 = await fileToBase64(file);
+      const res = await apiPost('uploadLogo', { base64, mime: file.type });
+      btn.disabled = false; btn.textContent = 'Unggah Logo';
+      toast(res.message, res.success ? 'ok' : 'err');
+      if (res.success){
+        document.getElementById('logo-preview').innerHTML = `<img src="${res.data.url}" style="width:100%;height:100%;object-fit:contain">`;
+        Store.set('pengaturan', null);
+        AppSettings.set(Object.assign({}, p, { logo_url: res.data.url }));
+      }
     };
     document.getElementById('form-password').onsubmit = async (e) => {
       e.preventDefault();
@@ -500,6 +656,14 @@ function renderPengaturan(){
   });
 }
 function v(id){ return document.getElementById(id).value; }
+function fileToBase64(file){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',').pop());
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
 
 // ===================== BOOT =====================
 document.addEventListener('DOMContentLoaded', () => {
