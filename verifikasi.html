@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Verifikasi Dokumen — SIMANDES</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="logo-box">SM</div>
+    <h1>Verifikasi Dokumen</h1>
+    <div class="sub">Masukkan Kode Verifikasi 20 karakter yang tercetak pada dokumen LRA APBDes Puspahiang.</div>
+    <div id="hasil" class="hidden"></div>
+    <form id="form-verif">
+      <div class="field"><label>Kode Verifikasi</label><input id="kode" required style="text-transform:uppercase"></div>
+      <button class="btn btn-primary" style="width:100%;justify-content:center">Cek Keaslian Dokumen</button>
+    </form>
+  </div>
+</div>
+<script src="js/config.js"></script>
+<script>
+document.getElementById('form-verif').onsubmit = async (e) => {
+  e.preventDefault();
+  const kode = document.getElementById('kode').value.trim().toUpperCase();
+  const res = await fetch(`${GAS_URL}?action=verifikasiDokumen&kode=${encodeURIComponent(kode)}`).then(r=>r.json());
+  const host = document.getElementById('hasil');
+  host.classList.remove('hidden');
+  host.innerHTML = res.success
+    ? `<div class="login-error" style="background:#dcfce7;color:#166534;border-color:#166534">
+         ✅ Dokumen SAH — Nomor: <b>${res.data.nomor}</b><br>Diterbitkan: ${new Date(res.data.dibuat).toLocaleString('id-ID')}<br>Hash: <code style="font-size:10px">${res.data.hash}</code>
+       </div>`
+    : `<div class="login-error">❌ ${res.message}</div>`;
+};
+</script>
+</body>
+</html>
